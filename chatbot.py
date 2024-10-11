@@ -24,7 +24,7 @@ mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
 
 llm = ChatOpenAI()
 output_parser = StrOutputParser()
-session_store: dict[str, BaseChatMessageHistory] = Field(default_factory=dict)
+session_store: dict[str, BaseChatMessageHistory] = {}
 message_retriever = MessageRetriever(mongo_client=mongo_client)
 
 system_prompt = (
@@ -52,7 +52,7 @@ async def chatbot():
 
     print("Welcome to the chatbot! Type 'bye' to quit.")
 
-    user_input = await aioconsole.ainput("Input name of previous session to continue or a new one:")
+    user_input = await aioconsole.ainput("Input session name: ")
     session_id = user_input.lower()
 
     while True:
@@ -81,14 +81,14 @@ async def chatbot():
             {
                 "configurable": {"session_id": session_id}
             },
-        )["answer"]
+        )
 
-        print(response)
+        print(response["answer"])
 
 async def main() -> None:
-    await message_retriever.update_database(mongo_client=mongo_client)
+    #await message_retriever.update_database()
 
-    #await chatbot()
+    await chatbot()
 
 if __name__ == "__main__":
     asyncio.run(main())
