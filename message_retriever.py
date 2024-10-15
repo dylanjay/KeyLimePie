@@ -87,13 +87,8 @@ class MessageRetriever(BaseRetriever):
         await database.create_collection(collection_name)
 
     async def update_database(self) -> None:
-        slack_token = os.environ.get(slack_bot_token_key)
-
-        if not slack_token:
-            print(f"{slack_bot_token_key} envar was not found")
-            return
-
         try:
+            slack_token = os.environ.get(slack_bot_token_key)
             slack_client = WebClient(token=slack_token)
         except Exception as error:
             print("An exception occurred getting slack client:", error)

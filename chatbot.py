@@ -58,8 +58,15 @@ Type '/thread' for a new thread
 """
 )
 
-    db_URI = "mongodb+srv://dylan:MSNYJMzVmbB8Z08E@slackragcluster.0lzyr.mongodb.net/?retryWrites=true&w=majority&appName=SlackRagCluster"
-    mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
+    try:
+        db_pw_key = "SLACK_RAG_CLUSTER_PW"
+        db_pw = os.environ.get(db_pw_key)
+        db_URI_key = "SLACK_RAG_CLUSTER_URI"
+        db_URI = os.environ.get(db_URI_key).format(db_pw=db_pw)
+        mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
+    except Exception as error:
+        print("An exception occurred setting up mongo client:", error)
+
     database_name = "SlackbotData"
     documents_collection_name = "Documents"
     search_keys_collection_name = "SearchKeys"
