@@ -11,84 +11,166 @@ from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.documents import Document
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import Runnable
 from langchain.chains import create_retrieval_chain, create_history_aware_retriever
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 from message_retriever import MessageRetriever
-from typing import List, Optional
+from typing import List, Optional, Sequence
+from typing_extensions import Annotated, TypedDict
 from pydantic import Field
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.server_api import ServerApi
+from bson.objectid import ObjectId
 
-db_URI = "mongodb+srv://dylan:MSNYJMzVmbB8Z08E@slackragcluster.0lzyr.mongodb.net/?retryWrites=true&w=majority&appName=SlackRagCluster"
-mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
+#TODO: remove
+rag_chain: Runnable = Field(default_factory=Runnable)
 
-llm = ChatOpenAI()
-output_parser = StrOutputParser()
-session_store: dict[str, BaseChatMessageHistory] = {}
-message_retriever = MessageRetriever(mongo_client=mongo_client)
+class SlackChatBot():
 
-system_prompt = (
-    """You are an assistant for question-answering tasks.
-    Use only the following pieces of retrieved context to answer
-    the question and nothing else. If you don't know the answer, say that you
-    don't know. Use three sentences maximum and keep the 
-    answer concise.
-    \n\n
-    {context}""")
+    contextualize_system_prompt = (
+        """You are an assistant for question-answering tasks.
+        Use only the following pieces of retrieved context to answer
+        the question and nothing else. If you don't know the answer, say that you
+        don't know.
+        """)
 
-prompt = ChatPromptTemplate.from_messages(
-[
-    ("system", "Answer the user's questions based on the below context:\n\n{context}"),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}"),
-])
+    contextualize_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
 
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if not session_id in session_store:
-        session_store[session_id] = ChatMessageHistory()
-    return session_store[session_id]
+    qa_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "Answer the user's questions based on the below context:\n\n{context}"),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
 
-async def chatbot():
+    welcome_prompt = (
+"""Welcome to the chatbot!
+Type '/bye' to quit
+Type '/thread' for a new thread
+"""
+)
 
-    print("Welcome to the chatbot! Type 'bye' to quit.")
+    db_URI = "mongodb+srv://dylan:MSNYJMzVmbB8Z08E@slackragcluster.0lzyr.mongodb.net/?retryWrites=true&w=majority&appName=SlackRagCluster"
+    mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
+    database_name = "SlackbotData"
+    documents_collection_name = "Documents"
+    search_keys_collection_name = "SearchKeys"
+    threads_collection_name = "Threads"
 
-    user_input = await aioconsole.ainput("Input session name: ")
-    session_id = user_input.lower()
+    llm = ChatOpenAI(model="gpt-4o-mini")
 
-    while True:
-        user_input = await aioconsole.ainput("")
-        user_input = user_input.lower()
+    #thread_store: dict[str, BaseChatMessageHistory] = {}
+    #TODO: remove this
+    user_id = "test"
+    #thread_id: str = Field(default_factory=str)
+    #app_config: dict[dict[str, str]] = Field(default_factory=dict[dict[str, str]])
+    thread_id = "test"
+    app_config = {"configurable": {"thread_id": thread_id}}
 
-        if user_input == "bye":
-            print("Goodbye!")
-            break
+    message_retriever = MessageRetriever(mongo_client=mongo_client,
+                                         database_name=database_name,
+                                         documents_collection_name=documents_collection_name,
+                                         search_keys_collection_name=search_keys_collection_name)
+    retriever_chain = create_history_aware_retriever(llm, message_retriever, contextualize_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    global rag_chain
+    rag_chain = create_retrieval_chain(retriever_chain, question_answer_chain)
 
-        question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    class State(TypedDict):
+        input: str
+        chat_history: Annotated[Sequence[BaseMessage], add_messages]
+        context: str
+        answer: str
 
-        rag_chain = create_retrieval_chain(message_retriever, question_answer_chain)
+    async def call_model(state: State):
+        response = await rag_chain.ainvoke(state)
+        return {
+            "chat_history": [
+                HumanMessage(state["input"]),
+                AIMessage(response["answer"]),
+            ],
+            "context": response["context"],
+            "answer": response["answer"],
+        }
+    
+    state_graph = StateGraph(state_schema=State)
+    # Define the (single) node in the graph
+    state_graph.add_edge(START, "model")
+    state_graph.add_node("model", call_model)
+    app = state_graph.compile(checkpointer=MemorySaver())
 
-        conversational_rag_chain = RunnableWithMessageHistory(
-        rag_chain,
-        get_session_history,
-        history_messages_key="chat_history",
-        input_messages_key="input",
-        output_messages_key="answer",
-        )
+    async def activate_thread(self, thread_id: str) -> None:
+        if not thread_id:
+            user_input = await aioconsole.ainput("Input thread name: ")
+            print()
+            self.thread_id = user_input.lower()
+        else:
+            self.thread_id = thread_id
+        self.app_config = {"configurable": {"thread_id": self.thread_id}}
 
-        response = await conversational_rag_chain.ainvoke(
-            {"input": user_input},
-            config=
-            {
-                "configurable": {"session_id": session_id}
-            },
-        )
+        database = self.mongo_client[self.database_name]
+        query_filter = { "user_id": self.user_id, "thread_id": self.thread_id }
+        find_thread = await database[self.threads_collection_name].find_one(query_filter)
+        if not find_thread:
+            await database[self.threads_collection_name].insert_one({"user_id": self.user_id, "thread_id": self.thread_id, "chat_history": []})
+        else:
+            for message in find_thread["chat_history"]:
+                message_to_add: BaseMessage
+                match(message["type"]):
+                    case "human":
+                        message_to_add = HumanMessage(message["content"])
 
-        print(response["answer"])
+                    case "ai":
+                        message_to_add = AIMessage(message["content"])
 
-async def main() -> None:
-    #await message_retriever.update_database()
+                self.app.update_state(self.app_config, {"chat_history": message_to_add})
 
-    await chatbot()
+    async def chatbot(self,):
+
+        await self.activate_thread(thread_id="test")
+
+        print(self.welcome_prompt)
+
+        while True:
+            user_input = await aioconsole.ainput("query: ")
+            user_input = user_input.lower()
+            print()
+
+            match(user_input):
+                case "/bye":
+                    print("Goodbye!")
+                    break
+
+                case "/thread":
+                    await self.activate_thread()
+
+            response = await self.app.ainvoke(
+                {"input": user_input},
+                config=self.app_config,
+            )
+
+            database = self.mongo_client[self.database_name]
+            query_filter = { "user_id": self.user_id, "thread_id": self.thread_id }
+            serializable_chat_history = [message.to_json().get("kwargs") for message in response["chat_history"]]
+            update_operation = { "$set": { "chat_history": serializable_chat_history } }
+            database[self.threads_collection_name].update_one(query_filter, update_operation)
+
+            print(response["answer"])
+            print()
+
+    async def main(self,) -> None:
+        #await message_retriever.update_database()
+
+        await self.chatbot()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    slack_chat_bot = SlackChatBot()
+    asyncio.run(slack_chat_bot.main())
