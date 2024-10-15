@@ -22,9 +22,6 @@ basic_words_file_path = "basic_words.txt"
 doc_store_path = "doc_store.json"
 search_dict_path = "search_dict.json"
 slack_channel_types = "public_channel"
-database_name = "SlackbotData"
-documents_collection_name = "Documents"
-search_keys_collection_name = "SearchKeys"
 
 class MessageRetriever(BaseRetriever):
     num_relevant_docs: int = 5
@@ -34,6 +31,9 @@ class MessageRetriever(BaseRetriever):
     basic_words: set[str] = Field(default_factory=set)
     soundex:Soundex = fuzzy.Soundex(4)
     mongo_client: AsyncIOMotorClient = Field(default_factory=AsyncIOMotorClient)
+    database_name: str = Field(default_factory=str)
+    documents_collection_name: str = Field(default_factory=str)
+    search_keys_collection_name: str = Field(default_factory=str)
 
 
     async def add_channel_messages_to_database(self, slack_client: WebClient, channel_id: str, word_keys: set[str]) -> None:
@@ -49,12 +49,12 @@ class MessageRetriever(BaseRetriever):
             messages = channel_history["messages"]
 
             for message in messages:
-                database = self.mongo_client[database_name]
+                database = self.mongo_client[self.database_name]
 
                 doc_id = ObjectId()
                 messageText = message["text"]
                 metadata = {"channel_id": channel_id, "user": message["user"], "ts": message["ts"]}
-                await database[documents_collection_name].insert_one({"_id": doc_id, "page_content": messageText, "metadata": metadata})
+                await database[self.documents_collection_name].insert_one({"_id": doc_id, "page_content": messageText, "metadata": metadata})
 
                 local_word_keys = set()
                 for word in re.split(r"[ .;,?!\"]", messageText):
@@ -67,13 +67,13 @@ class MessageRetriever(BaseRetriever):
 
                     if not word_key in word_keys:
                         word_keys.add(word_key)
-                        await database[search_keys_collection_name].insert_one({"_id": word_key, "doc_ids": [doc_id]})
+                        await database[self.search_keys_collection_name].insert_one({"_id": word_key, "doc_ids": [doc_id]})
                             
                     local_word_keys.add(word_key)
 
                 query_filter = { "_id": { "$in": list(local_word_keys)} }
                 update_operation = { "$push": { "doc_ids": doc_id } }
-                await database[search_keys_collection_name].update_many(query_filter, update_operation)
+                await database[self.search_keys_collection_name].update_many(query_filter, update_operation)
 
             response_metadata = channel_history["response_metadata"]
 
@@ -106,9 +106,9 @@ class MessageRetriever(BaseRetriever):
             print(f"Error fetching channels list: {e.response['error']}")
             return
 
-        database = self.mongo_client[database_name]
-        await self.empty_collection(database=database, collection_name=documents_collection_name)
-        await self.empty_collection(database=database, collection_name=search_keys_collection_name)
+        database = self.mongo_client[self.database_name]
+        await self.empty_collection(database=database, collection_name=self.documents_collection_name)
+        await self.empty_collection(database=database, collection_name=self.search_keys_collection_name)
 
         channels = result["channels"]
 
@@ -116,10 +116,13 @@ class MessageRetriever(BaseRetriever):
         for channel in channels:
             await self.add_channel_messages_to_database(slack_client=slack_client, channel_id=channel["id"], word_keys=word_keys)
 
-    def __init__(self, mongo_client: AsyncIOMotorClient) -> None:
+    def __init__(self, mongo_client: AsyncIOMotorClient, database_name, documents_collection_name, search_keys_collection_name,) -> None:
         super().__init__()
 
         self.mongo_client = mongo_client
+        self.database_name = database_name
+        self.documents_collection_name = documents_collection_name
+        self.search_keys_collection_name = search_keys_collection_name
 
         try:
             with open(basic_words_file_path, 'r') as file:
@@ -139,15 +142,15 @@ class MessageRetriever(BaseRetriever):
     async def aget_relevant_documents(self, query: str,) -> List[Document]:
         query_doc_occurrences = defaultdict(float)
 
-        database = self.mongo_client[database_name]
-        doc_collection = database[documents_collection_name]
+        database = self.mongo_client[self.database_name]
+        doc_collection = database[self.documents_collection_name]
 
         for word in re.split(r"[ .;,?!\"]", query):
             if not word or word in self.basic_words:
                 continue
 
             word_key = self.soundex(word)
-            search_key_obj = await database[search_keys_collection_name].find_one({ "_id": word_key })
+            search_key_obj = await database[self.search_keys_collection_name].find_one({ "_id": word_key })
 
             if search_key_obj:
                 self.handle_query_doc_occurrence(query_doc_occurrences=query_doc_occurrences, doc_ids=search_key_obj["doc_ids"], doc_collection=doc_collection)
