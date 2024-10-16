@@ -72,9 +72,12 @@ Type '/thread' for a new thread
     search_keys_collection_name = "SearchKeys"
     threads_collection_name = "Threads"
 
+    slack_bot_user_id = "U07P9UX792P"
+    slack_bot_token_key = "SLACK_BOT_TOKEN"
+    basic_words_file_path = "basic_words.txt"
+
     llm = ChatOpenAI(model="gpt-4o-mini")
 
-    #thread_store: dict[str, BaseChatMessageHistory] = {}
     #TODO: remove this
     user_id = "test"
     #thread_id: str = Field(default_factory=str)
@@ -83,6 +86,7 @@ Type '/thread' for a new thread
     app_config = {"configurable": {"thread_id": thread_id}}
 
     message_retriever = MessageRetriever(mongo_client=mongo_client,
+                                         basic_words_file_path=basic_words_file_path,
                                          database_name=database_name,
                                          documents_collection_name=documents_collection_name,
                                          search_keys_collection_name=search_keys_collection_name)
@@ -109,7 +113,6 @@ Type '/thread' for a new thread
         }
     
     state_graph = StateGraph(state_schema=State)
-    # Define the (single) node in the graph
     state_graph.add_edge(START, "model")
     state_graph.add_node("model", call_model)
     app = state_graph.compile(checkpointer=MemorySaver())
@@ -174,8 +177,6 @@ Type '/thread' for a new thread
             print()
 
     async def main(self,) -> None:
-        #await message_retriever.update_database()
-
         await self.chatbot()
 
 if __name__ == "__main__":
