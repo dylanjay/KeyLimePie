@@ -2,8 +2,6 @@ import re
 import os
 import fuzzy
 import asyncio
-from slack_sdk import WebClient 
-from slack_sdk.errors import SlackApiError 
 from typing import List, Any, Optional
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
@@ -11,7 +9,6 @@ from collections import defaultdict
 from fuzzy import Soundex
 from pydantic import Field
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
-from bson.objectid import ObjectId
 
 class MessageRetriever(BaseRetriever):
     

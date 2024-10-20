@@ -2,7 +2,11 @@ import sys
 import os
 import aioconsole
 import asyncio
+import http
+import socketserver
+import json
 from collections import defaultdict
+from httpcore import Response
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
@@ -23,6 +27,10 @@ from pydantic import Field
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from aiohttp import web
+from slack_sdk import WebClient 
+from slack_sdk.errors import SlackApiError 
 
 #TODO: remove
 rag_chain: Runnable = Field(default_factory=Runnable)
@@ -55,6 +63,7 @@ class SlackChatBot():
 """Welcome to the chatbot!
 Type '/bye' to quit
 Type '/thread' for a new thread
+Type '/reset' to reset the current thread
 """
 )
 
@@ -71,19 +80,23 @@ Type '/thread' for a new thread
     documents_collection_name = "Documents"
     search_keys_collection_name = "SearchKeys"
     threads_collection_name = "Threads"
+    users_collection_name = "Users"
 
     slack_bot_user_id = "U07P9UX792P"
-    slack_bot_token_key = "SLACK_BOT_TOKEN"
+    try:
+        slack_token = os.environ.get("SLACK_BOT_TOKEN")
+        slack_client = WebClient(token=slack_token)
+    except Exception as error:
+        print("An exception occurred getting slack client:", error)
+
     basic_words_file_path = "basic_words.txt"
 
-    llm = ChatOpenAI(model="gpt-4o-mini")
+    port = "80"
 
-    #TODO: remove this
-    user_id = "test"
-    #thread_id: str = Field(default_factory=str)
-    #app_config: dict[dict[str, str]] = Field(default_factory=dict[dict[str, str]])
-    thread_id = "test"
-    app_config = {"configurable": {"thread_id": thread_id}}
+    user_id: str = Field(default_factory=str)
+    thread_id: str = Field(default_factory=str)
+
+    llm = ChatOpenAI(model="gpt-4o-mini")
 
     message_retriever = MessageRetriever(mongo_client=mongo_client,
                                          basic_words_file_path=basic_words_file_path,
@@ -115,18 +128,22 @@ Type '/thread' for a new thread
     state_graph = StateGraph(state_schema=State)
     state_graph.add_edge(START, "model")
     state_graph.add_node("model", call_model)
+    app_config: str = Field(default_factory=str)
     app = state_graph.compile(checkpointer=MemorySaver())
 
     async def activate_thread(self, thread_id: str) -> None:
-        if not thread_id:
-            user_input = await aioconsole.ainput("Input thread name: ")
-            print()
-            self.thread_id = user_input.lower()
-        else:
-            self.thread_id = thread_id
+        if self.thread_id is thread_id:
+            return
+
+        self.thread_id = thread_id
         self.app_config = {"configurable": {"thread_id": self.thread_id}}
 
         database = self.mongo_client[self.database_name]
+
+        query_filter = { "_id": self.user_id }
+        update_operation = { "$set": { "thread_id": self.thread_id } }
+        await database[self.users_collection_name].update_one(query_filter, update_operation)
+
         query_filter = { "user_id": self.user_id, "thread_id": self.thread_id }
         find_thread = await database[self.threads_collection_name].find_one(query_filter)
         if not find_thread:
@@ -143,41 +160,133 @@ Type '/thread' for a new thread
 
                 self.app.update_state(self.app_config, {"chat_history": message_to_add})
 
-    async def chatbot(self,):
+    async def set_chat_history(self, chat_history: List[str]) -> None:
+        database = self.mongo_client[self.database_name]
+        query_filter = { "user_id": self.user_id, "thread_id": self.thread_id }
+        update_operation = { "$set": { "chat_history": chat_history } }
+        await database[self.threads_collection_name].update_one(query_filter, update_operation)
 
-        await self.activate_thread(thread_id="test")
-
-        print(self.welcome_prompt)
-
-        while True:
-            user_input = await aioconsole.ainput("query: ")
-            user_input = user_input.lower()
-            print()
-
-            match(user_input):
-                case "/bye":
-                    print("Goodbye!")
-                    break
-
-                case "/thread":
-                    await self.activate_thread()
-
-            response = await self.app.ainvoke(
-                {"input": user_input},
-                config=self.app_config,
-            )
+    async def detect_config_change(self, user_id: str) -> None:
+        if not self.user_id or not self.thread_id or user_id != self.user_id:
+            self.user_id = user_id
 
             database = self.mongo_client[self.database_name]
-            query_filter = { "user_id": self.user_id, "thread_id": self.thread_id }
-            serializable_chat_history = [message.to_json().get("kwargs") for message in response["chat_history"]]
-            update_operation = { "$set": { "chat_history": serializable_chat_history } }
-            database[self.threads_collection_name].update_one(query_filter, update_operation)
+            filter = { "_id": self.user_id }
+            user_obj = await database[self.users_collection_name].find_one(filter)
 
-            print(response["answer"])
-            print()
+            if user_obj:
+                thread_id = user_obj["thread_id"]
+            else:
+                thread_id = str(ObjectId())
+                await database[self.users_collection_name].insert_one({"_id": self.user_id})
+
+            await self.activate_thread(thread_id=thread_id)
+
+    def serialize_chat_history(self,) -> List[str]:
+        return [message.to_json().get("kwargs") for message in self.app.get_state(self.app_config).values["chat_history"]]
+
+    async def answer_query(self, data) -> None:
+        event = data["event"]
+        channel_id = event["channel"]
+        message = event["text"]
+        user_id = event["user"]
+
+        await self.detect_config_change(user_id)
+
+        llm_response = await self.app.ainvoke(
+            {"input": message},
+            config=self.app_config,
+        )
+
+        slack_response = self.slack_client.chat_postMessage(
+            channel=channel_id,
+            text=llm_response["answer"]
+        )
+
+        await self.set_chat_history(self.serialize_chat_history())
+
+    async def handle_message(self, request) -> Response:
+        data = await request.json()
+        event = data["event"]
+        user_id = event["user"]
+
+        if user_id != self.slack_bot_user_id:
+            asyncio.create_task(self.answer_query(data))
+
+        return web.Response(status=200)
+
+    async def handle_thread(self, request) -> Response:
+        data = await request.json()
+
+        await self.detect_config_change(request)
+
+        return web.Response(status=200)
+
+    async def handle_reset(self, request) -> Response:
+        data = await request.json()
+        event = data["event"]
+        user_id = event["user"]
+
+        await self.detect_config_change(user_id)
+
+        await self.set_chat_history([])
+
+        return web.Response(status=200)
+
+    async def send_slack_chat_history(self, data) -> None:
+        channel_id = data["channel_id"]
+        user_id = data["user_id"]
+
+        await self.detect_config_change(user_id)
+
+        state = self.app.get_state(self.app_config).values
+        blocks = []
+        for message in state["chat_history"]:
+            blocks.append(
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"==== {message.type.title()} Message ====="
+                }
+            })
+
+            blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "plain_text",
+                    "text": message.content
+                }
+            })
+
+        slack_response = self.slack_client.chat_postMessage(
+            channel=channel_id,
+            blocks=blocks,
+            text=message.pretty_repr(),
+        )
+
+    async def handle_print(self, request) -> Response:
+        data = dict(await request.post())
+        asyncio.create_task(self.send_slack_chat_history(data))
+
+        return web.Response(status=200)
+
 
     async def main(self,) -> None:
-        await self.chatbot()
+        web_app = web.Application()
+        web_app.router.add_post("/", self.handle_message)
+        web_app.router.add_post("/thread", self.handle_thread)
+        web_app.router.add_post("/reset", self.handle_reset)
+        web_app.router.add_post("/print", self.handle_print)
+
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, 'localhost', self.port)
+        await site.start()
+
+        print(f"Server started at http://localhost:{self.port}/")
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     slack_chat_bot = SlackChatBot()
