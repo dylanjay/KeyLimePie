@@ -2,47 +2,58 @@ import re
 import os
 import fuzzy
 import asyncio
-from slack_sdk import WebClient 
+from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError 
 from typing import List, Any, Optional
 from collections import defaultdict
 from fuzzy import Soundex
 from pydantic import Field
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
 class TextSearch():
     num_messages_request = 200
     slack_channel_types = "public_channel"
 
+    try:
+        db_pw_key = "SLACK_RAG_CLUSTER_PW"
+        db_pw = os.environ.get(db_pw_key)
+        db_URI_key = "SLACK_RAG_CLUSTER_URI"
+        db_URI = os.environ.get(db_URI_key).format(db_pw=db_pw)
+        mongo_client = AsyncIOMotorClient(db_URI, server_api=ServerApi('1'))
+    except Exception as error:
+        print("An exception occurred setting up mongo client:", error)
+    
     basic_words: set[str] = Field(default_factory=set)
-    mongo_client: AsyncIOMotorClient = Field(default_factory=AsyncIOMotorClient)
-    database_name: str = Field(default_factory=str)
-    documents_collection_name: str = Field(default_factory=str)
-    search_keys_collection_name: str = Field(default_factory=str)
+    try:
+        basic_words_file_path = "basic_words.txt"
+        with open(basic_words_file_path, 'r') as file:
+            basic_words = {word.strip() for word in file}
+    except FileNotFoundError:
+        print(f"Error: {basic_words_file_path} not found.")
+
+    slack_bot_user_id = "U07P9UX792P"
+    try:
+        slack_token = os.environ.get("SLACK_BOT_TOKEN")
+        slack_client = AsyncWebClient(token=slack_token)
+    except Exception as error:
+        print("An exception occurred getting slack client:", error)
+
+    database_name = "SlackbotData"
+    documents_collection_name = "Documents"
+    search_keys_collection_name = "SearchKeys"
+    threads_collection_name = "Threads"
+    users_collection_name = "Users"
 
     soundex:Soundex = fuzzy.Soundex(4)
 
-    def __init__(self, mongo_client: AsyncIOMotorClient, basic_words_file_path, database_name, documents_collection_name, search_keys_collection_name,) -> None:
-        super().__init__()
-
-        self.mongo_client = mongo_client
-        self.database_name = database_name
-        self.documents_collection_name = documents_collection_name
-        self.search_keys_collection_name = search_keys_collection_name
-
-        try:
-            with open(basic_words_file_path, 'r') as file:
-                self.basic_words = {word.strip() for word in file}
-        except FileNotFoundError:
-            print(f"Error: {basic_words_file_path} not found.")
-
-    async def add_channel_messages_to_database(self, slack_client: WebClient, channel_id: str, word_keys: set[str]) -> None:
+    async def add_channel_messages_to_database(self, channel_id: str, word_keys: set[str]) -> None:
         cursor = None
 
         while True:
             try:
-                channel_history = slack_client.conversations_history(channel=channel_id, limit=self.num_messages_request, cursor=cursor)
+                channel_history = await self.slack_client.conversations_history(channel=channel_id, limit=self.num_messages_request, cursor=cursor)
             except SlackApiError as e:
                 print(f"Error fetching messages: {e.response['error']}")
                 return
@@ -88,16 +99,10 @@ class TextSearch():
         await database.create_collection(collection_name)
 
     async def update_database(self) -> None:
-        try:
-            slack_token = os.environ.get(self.slack_bot_token_key)
-            slack_client = WebClient(token=slack_token)
-        except Exception as error:
-            print("An exception occurred getting slack client:", error)
-
         cursor = None
 
         try:
-            result = slack_client.users_conversations(user=self.slack_bot_user_id, cursor=cursor, types=self.slack_channel_types)
+            result = await self.slack_client.users_conversations(user=self.slack_bot_user_id, cursor=cursor, types=self.slack_channel_types)
         except SlackApiError as e:
             print(f"Error fetching channels list: {e.response['error']}")
             return
@@ -110,4 +115,8 @@ class TextSearch():
 
         word_keys = set()
         for channel in channels:
-            await self.add_channel_messages_to_database(slack_client=slack_client, channel_id=channel["id"], word_keys=word_keys)
+            await self.add_channel_messages_to_database(channel_id=channel["id"], word_keys=word_keys)
+
+if __name__ == "__main__":
+    text_search = TextSearch()
+    asyncio.run(text_search.update_database())
