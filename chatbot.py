@@ -62,7 +62,7 @@ class SlackChatBot():
 
     title_generation_prompt = ChatPromptTemplate.from_messages(
     [
-        ("system", "Generate a short title name to summarize the question below. Preferably keep it less than 5 words"),
+        ("system", "Generate a short title name to summarize the question below. Preferably keep it less than 5 words with no punctuation"),
         ("human", "{input}"),
     ])
 
@@ -110,7 +110,7 @@ class SlackChatBot():
     slack_menu_builder = SlackMenuBuilder()
 
     class State(TypedDict):
-        user_input: str
+        input: str
         chat_history: Annotated[Sequence[BaseMessage], add_messages]
         context: str
         answer: str
@@ -119,7 +119,7 @@ class SlackChatBot():
         response = await rag_chain.ainvoke(state)
         return {
             "chat_history": [
-                HumanMessage(state["user_input"]),
+                HumanMessage(state["input"]),
                 AIMessage(response["answer"]),
             ],
             "context": response["context"],
@@ -178,22 +178,74 @@ class SlackChatBot():
             query_filter = { "_id": self.user_id }
             user_obj = await database[self.users_collection_name].find_one(query_filter)
 
-            if user_obj:
-                chat_id = user_obj["chat_id"]
-            else:
+            if not user_obj:
                 chat_id = ObjectId()
                 await database[self.users_collection_name].insert_one({"_id": self.user_id})
+            elif not chat_id:
+                chat_id = user_obj["chat_id"]
 
         await self.switch_chat(chat_id=chat_id)
 
     def serialize_chat_history(self,) -> List[str]:
         return [message.to_json().get("kwargs") for message in self.app.get_state(self.app_config).values["chat_history"]]
 
+    async def send_slack_chat_history(self, user_id:str, channel_id: str) -> SlackResponse:
+        await self.set_config(user_id)
+
+        state = self.app.get_state(self.app_config).values
+        blocks = []
+
+        if "chat_history" not in state:
+            slack_response = await self.slack_client.chat_postMessage(
+                channel=channel_id,
+                text=f"chat history is empty"
+            )
+        else:
+            messages_fallback = []
+            for message in state["chat_history"]:
+                blocks.append(
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"==== {message.type.title()} Message ====="
+                    }
+                })
+
+                blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "plain_text",
+                        "text": message.content
+                    }
+                })
+
+                messages_fallback.append(message.pretty_repr())
+
+            slack_response = await self.slack_client.chat_postMessage(
+                channel=channel_id,
+                blocks=blocks,
+                text='\n'.join(messages_fallback),
+            )
+
     async def answer_query(self, user_id: str, message: str, channel_id: str) -> None:
         await self.set_config(user_id)
 
+        state = self.app.get_state(self.app_config).values
+        chat_history = state["chat_history"] if "chat_history" in state else None
+        if not chat_history:
+            output_parser = StrOutputParser()
+            chain = self.title_generation_prompt | self.llm | output_parser
+            chat_title = await chain.ainvoke({"input": message})
+
+            database = self.mongo_client[self.database_name]
+            query_filter = { "_id": self.chat_id }
+            update_operation = { "$set": { "title": chat_title } }
+            await database[self.chats_collection_name].update_one(query_filter, update_operation)
+
         llm_response = await self.app.ainvoke(
-            {"user_input": message},
+            {"input": message},
             config=self.app_config,
         )
 
@@ -215,17 +267,6 @@ class SlackChatBot():
             asyncio.create_task(self.answer_query(user_id=user_id, message=message, channel_id=channel_id))
 
         return web.Response(status=200)
-
-    async def send_slack_chat_info(self, user_id: str, channel_id: ObjectId) -> SlackResponse:
-        await self.set_config(user_id)
-
-        # TODO
-        slack_response = await self.slack_client.chat_postMessage(
-            channel=channel_id,
-            text=f"current chat name: {self.chat_id}",
-        )
-
-        return slack_response
 
     async def send_slack_menu(self, user_id: str, channel_id: str) -> SlackResponse:
         await self.set_config(user_id)
@@ -260,56 +301,75 @@ class SlackChatBot():
 
         return await self.set_chat_history([])
 
-    async def send_slack_chat_history(self, user_id:str, channel_id: str) -> SlackResponse:
-        await self.set_config(user_id)
+    async def add_new_chat(self, user_id: str, message: str, channel_id: str) -> None:
+        new_chat_id = ObjectId()
+        await self.set_config(user_id, new_chat_id)
 
-        state = self.app.get_state(self.app_config).values
-        blocks = []
+        await self.answer_query(user_id=user_id, message=message, channel_id=channel_id)
 
-        if "chat_history" not in state:
-            slack_response = await self.slack_client.chat_postMessage(
+    async def switch_chat_notify(self, user_id: str, chat_id: ObjectId, channel_id: str) -> None:
+        await self.set_config(user_id=user_id, chat_id=chat_id)
+
+        database = self.mongo_client[self.database_name]
+        query_filter = { "_id": self.chat_id }
+        chat_obj = await database[self.chats_collection_name].find_one(query_filter)
+        chat_title = chat_obj["title"]
+
+        slack_response = await self.slack_client.chat_postMessage(
             channel=channel_id,
-            text=f"chat history is empty"
-            )
-        else:
-            messages_fallback = []
-            for message in state["chat_history"]:
-                blocks.append(
+            blocks=[
                 {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"==== {message.type.title()} Message ====="
-                    }
-                })
-
-                blocks.append(
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "plain_text",
-                        "text": message.content
-                    }
-                })
-
-                messages_fallback.append(message.pretty_repr())
-
-            slack_response = await self.slack_client.chat_postMessage(
-            channel=channel_id,
-            blocks=blocks,
-            text='\n'.join(messages_fallback),
-            )
-
-        return slack_response
+			        "type": "section",
+			        "text": {
+				        "type": "mrkdwn",
+				        "text": f"Chat set to `{chat_title}`"
+			        }
+		        },
+            ],
+            text=f"Chat set to \"{chat_title}\""
+        )
 
     async def handle_interact(self, request) -> Response:
+        data = await request.post()
+        payload = json.loads(data["payload"])
+        user_id = payload["user"]["id"]
+        channel_id = payload["channel"]["id"]
+        actions = payload["actions"]
+        
+        for action in actions:
+            action_id = action["action_id"]
+
+            match action_id:
+                case "show_full_chat_history":
+                    asyncio.create_task(self.send_slack_chat_history(user_id=user_id, channel_id=channel_id))
+
+                case "add_new_chat":
+                    message = payload["state"]["values"]["new_chat_input"]["add_new_chat"]["value"]
+                    if not message:
+                        return web.Response(status=400, reason="new chat requires a query")
+
+                    asyncio.create_task(self.add_new_chat(user_id=user_id, message=message, channel_id=channel_id))
+
+                case "switch_chat":
+                    chat_id = None
+                    match action["type"]:
+                        case "button":
+                            chat_id = ObjectId(action["value"])
+                        case "static_select":
+                            selected_option = action["selected_option"]
+                            if selected_option:
+                                chat_id = ObjectId(selected_option["value"])
+
+                    if chat_id:
+                        asyncio.create_task(self.switch_chat_notify(user_id=user_id, chat_id=chat_id, channel_id=channel_id))
+
         return web.Response(status=200)
 
     async def main(self,) -> None:
         web_app = web.Application()
         web_app.router.add_post("/", self.handle_message)
         web_app.router.add_post("/menu", self.handle_menu)
-        web_app.router.add_get("/interact", self.handle_interact)
+        web_app.router.add_post("/interact", self.handle_interact)
 
         runner = web.AppRunner(web_app)
         await runner.setup()

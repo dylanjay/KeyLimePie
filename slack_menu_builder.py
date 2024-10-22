@@ -92,24 +92,26 @@ class SlackMenuBuilder():
 				}
 			)
 
-	def build_chat_option(self, chat_title: str, chat_id: str) -> dict:
-		return {
-			"type": "section",
-			"text": {
-				"type": "mrkdwn",
-				"text": chat_title
-			},
-			"accessory": {
-				"type": "button",
-				"action_id": "switch_chat",
+	def build_chat_option(self, chat_title: str, chat_id: str) -> None:
+		self.blocks.append(
+			{
+				"type": "section",
 				"text": {
-					"type": "plain_text",
-					"emoji": True,
-					"text": "Switch"
+					"type": "mrkdwn",
+					"text": chat_title
 				},
-				"value": chat_id
+				"accessory": {
+					"type": "button",
+					"action_id": "switch_chat",
+					"text": {
+						"type": "plain_text",
+						"emoji": True,
+						"text": "Switch"
+					},
+					"value": chat_id
+				}
 			}
-		}
+		)
 
 	def build_chat_select_option(self, chat_title: str, chat_id: str) -> dict:
 		return {
@@ -191,6 +193,17 @@ class SlackMenuBuilder():
 	def build_menu(self, chat_title: str, chat_history: List[BaseMessage], chats: List[dict]) -> None:
 		self.blocks =[]
 
+		self.build_header("Chat Menu")
+		self.blocks.append(
+			{
+				"type": "section",
+				"text": {
+					"type": "mrkdwn",
+					"text": ":arrow_down: :arrow_down: :arrow_down: :arrow_down: :arrow_down:"
+				}
+			}
+		)
+		self.build_divider()
 		self.build_header(chat_title if chat_title else "No Current Chat")
 		self.build_history(chat_history)
 		self.build_new_line()
@@ -201,15 +214,16 @@ class SlackMenuBuilder():
 			{
 				"type": "input",
 				"block_id": "new_chat_input",
+				"dispatch_action": False,
 				"element": {
 					"type": "plain_text_input",
 					"multiline": True,
-					"action_id": "add_new_chat"
+					"action_id": "add_new_chat",
 				},
 				"label": {
 					"type": "plain_text",
 					"text": "New Chat"
-				}
+				},
 			}
 		)
 
