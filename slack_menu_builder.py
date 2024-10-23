@@ -40,7 +40,7 @@ class SlackMenuBuilder():
 	def build_history(self, chat_history: List[BaseMessage]) -> None:
 		elements = []
 		if chat_history:
-			for message in chat_history:
+			for message in chat_history[-6:]:
 				elements.append(self.build_history_option(message))
 		else:
 			elements = [
@@ -219,10 +219,14 @@ class SlackMenuBuilder():
 					"type": "plain_text_input",
 					"multiline": True,
 					"action_id": "add_new_chat",
+					"placeholder": {
+					  "type": "plain_text",
+					  "text": "Create a new thread of conversation",
+					}
 				},
 				"label": {
 					"type": "plain_text",
-					"text": "New Chat"
+					"text": "Create New Chat"
 				},
 			}
 		)
@@ -247,7 +251,7 @@ class SlackMenuBuilder():
 
 		self.build_new_line()
 		self.build_divider()
-		self.build_header("Previous Chats")
+		self.build_header("Your Chats")
 		self.build_chat_options(chats)
 
 	async def send(self,

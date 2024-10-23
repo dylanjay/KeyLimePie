@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 import aioconsole
 import asyncio
 import http
@@ -148,7 +149,7 @@ class SlackChatBot():
         query_filter = { "_id": self.chat_id }
         find_chat = await database[self.chats_collection_name].find_one(query_filter)
         if not find_chat:
-            await database[self.chats_collection_name].insert_one({ "_id": self.chat_id, "user_id": self.user_id, "title": "", "chat_history": [] })
+            await database[self.chats_collection_name].insert_one({ "_id": self.chat_id, "user_id": self.user_id, "title": "", "chat_history": [], "ts": time.time() })
         else:
             for message in find_chat["chat_history"]:
                 message_to_add: BaseMessage
@@ -281,6 +282,7 @@ class SlackChatBot():
 
         query_filter = { "user_id": self.user_id }
         chats = await database[self.chats_collection_name].find(query_filter).to_list()
+        chats = sorted(chats, key=lambda chat: chat["ts"], reverse=True)
 
         await self.slack_menu_builder.send(channel_id=channel_id,
                                     chat_title=chat_title,
