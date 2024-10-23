@@ -63,14 +63,27 @@ class MessageRetriever(BaseRetriever):
                 continue
 
             word_key = self.soundex(word)
+
             search_key_obj = await database[self.search_keys_collection_name].find_one({ "_id": word_key })
 
             if search_key_obj:
                 self.handle_query_doc_occurrence(query_doc_occurrences=query_doc_occurrences, doc_ids=search_key_obj["doc_ids"], doc_collection=doc_collection)
 
-        max_size = self.num_relevant_docs * (self.proximity * 2 + 1)
-        relevant_doc_ids = sorted(query_doc_occurrences, key=query_doc_occurrences.get, reverse=True)[:max_size]
+        relevant_doc_objs = await doc_collection.find( { "_id": { "$in": list(query_doc_occurrences.keys())} } ).to_list()
 
-        relevant_doc_objs = await doc_collection.find( { "_id": { "$in": list(relevant_doc_ids)} } ).to_list()
-        relevant_docs = [Document(id=doc_obj["_id"], page_content=doc_obj["page_content"], metadata=doc_obj["metadata"]) for doc_obj in relevant_doc_objs]
+        #max_size = self.num_relevant_docs * (self.proximity * 2 + 1)
+        relevant_doc_objs = sorted(relevant_doc_objs, key=lambda doc_obj: query_doc_occurrences[doc_obj["_id"]], reverse=True)
+
+        relevancy_total = sum(query_doc_occurrences.values())
+
+        relevant_docs = []
+        for doc_obj in relevant_doc_objs:
+            id = doc_obj["_id"]
+            page_content = doc_obj["page_content"]
+            metadata = doc_obj["metadata"]
+            relevancy_count = query_doc_occurrences[id]
+            metadata["relevancy_count"] = relevancy_count
+            metadata["relevancy_index"] = relevancy_count / relevancy_total
+            relevant_docs.append(Document(id=id, page_content=page_content, metadata=metadata))
+
         return relevant_docs

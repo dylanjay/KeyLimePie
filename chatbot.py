@@ -38,35 +38,6 @@ from slack_sdk.errors import SlackApiError
 rag_chain: Runnable = Field(default_factory=Runnable)
 
 class SlackChatBot():
-
-    contextualize_system_prompt = (
-        """You are an assistant for question-answering tasks.
-        Use only the following pieces of retrieved context to answer
-        the question and nothing else. If you don't know the answer, say that you
-        don't know. Format your answers in pretty Slack Block UI form.
-        """)
-
-    contextualize_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", contextualize_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ]
-    )
-
-    question_answer_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", "Answer the user's questions based on the below context:\n\n{context}"),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ])
-
-    title_generation_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", "Generate a short title name to summarize the question below. Preferably keep it less than 5 words with no punctuation"),
-        ("human", "{input}"),
-    ])
-
     try:
         db_pw_key = "SLACK_RAG_CLUSTER_PW"
         db_pw = os.environ.get(db_pw_key)
@@ -98,15 +69,50 @@ class SlackChatBot():
 
     llm = ChatOpenAI(model="gpt-4o-mini")
 
+    contextualize_system_prompt = (
+        """You are an input rephrasing assistant. You do not answer questions
+        but simply reformulate them if needed and otherwise return them as is.
+        Rephrase the latest user input into a question which can be understood without additional context
+        """)
+
+    contextualize_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_system_prompt),
+            MessagesPlaceholder("chat_history", optional=True),
+            ("human", "{input}"),
+        ]
+    )
+
+    question_answer_system_prompt = (
+        """You are an assistant for question-answering tasks.
+        Use only the following pieces of retrieved context to answer
+        the question and nothing else. If you don't know the answer, say that you
+        don't know. Prioritize the documents that come first.
+
+        {context}""")
+
+    question_answer_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", question_answer_system_prompt),
+        MessagesPlaceholder("chat_history", optional=True),
+        ("human", "{input}"),
+    ])
+
+    title_generation_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "Generate a short title name to summarize the question below. Preferably keep it less than 5 words with no punctuation"),
+        ("human", "{input}"),
+    ])
+
     message_retriever = MessageRetriever(mongo_client=mongo_client,
                                          basic_words_file_path=basic_words_file_path,
                                          database_name=database_name,
                                          documents_collection_name=documents_collection_name,
                                          search_keys_collection_name=search_keys_collection_name)
-    retriever_chain = create_history_aware_retriever(llm, message_retriever, contextualize_prompt)
-    question_answer_chain = create_stuff_documents_chain(llm, question_answer_prompt)
+    #history_aware_retriever = create_history_aware_retriever(llm=llm, retriever=message_retriever, prompt=contextualize_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm=llm, prompt=question_answer_prompt)
     global rag_chain
-    rag_chain = create_retrieval_chain(retriever_chain, question_answer_chain)
+    rag_chain = create_retrieval_chain(retriever=message_retriever, combine_docs_chain=question_answer_chain)
 
     slack_menu_builder = SlackMenuBuilder()
 
@@ -130,6 +136,7 @@ class SlackChatBot():
     state_graph = StateGraph(state_schema=State)
     state_graph.add_edge(START, "model")
     state_graph.add_node("model", call_model)
+
     app_config: str = Field(default_factory=str)
     app = state_graph.compile(checkpointer=MemorySaver())
 
@@ -250,9 +257,70 @@ class SlackChatBot():
             config=self.app_config,
         )
 
+        blocks = []
+        blocks.append(
+            {
+		        "type": "section",
+		        "text": {
+			        "type": "plain_text",
+			        "text": llm_response["answer"],
+		        }
+	        }
+        )
+
+        context = llm_response["context"]
+        if context:
+            links = []
+            for doc in context[:3]:
+                metadata = doc.metadata
+                link_channel_id = metadata["channel_id"]
+                ts = metadata["ts"]
+                relevancy_index = f"{metadata["relevancy_index"]:.0%}"
+
+                link_obj = await self.slack_client.chat_getPermalink(channel=link_channel_id, message_ts=ts)
+
+                links.append(
+                    {
+			            "type": "rich_text_section",
+			            "elements": [
+				            {
+					            "type": "link",
+					            "url": link_obj["permalink"],
+					            "text": f"{relevancy_index} confidence",
+					            "style": {
+						            "bold": True
+					            }
+				            }
+			            ]
+		            }
+                )
+
+            blocks.append(
+                {
+			        "type": "rich_text",
+			        "elements": [
+				        {
+					        "type": "rich_text_section",
+					        "elements": [
+						        {
+							        "type": "text",
+							        "text": "Relevant links:\n"
+						        }
+					        ]
+				        },
+				        {
+					        "type": "rich_text_list",
+					        "style": "ordered",
+					        "elements": links,
+				        }
+			        ]
+                }
+            )
+        
         slack_response = await self.slack_client.chat_postMessage(
-            channel=channel_id,
-            text=llm_response["answer"]
+            channel = channel_id,
+            blocks = blocks,
+            text = llm_response["answer"],
         )
 
         await self.set_chat_history(self.serialize_chat_history())
