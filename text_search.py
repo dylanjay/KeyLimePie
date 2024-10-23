@@ -64,13 +64,16 @@ class TextSearch():
                 database = self.mongo_client[self.database_name]
 
                 doc_id = ObjectId()
-                messageText = message["text"]
+                message_text = message["text"]
                 metadata = {"channel_id": channel_id, "user": message["user"], "ts": message["ts"]}
-                await database[self.documents_collection_name].insert_one({"_id": doc_id, "page_content": messageText, "metadata": metadata})
+                await database[self.documents_collection_name].insert_one({"_id": doc_id, "page_content": message_text, "metadata": metadata})
 
                 local_word_keys = set()
-                for word in re.split(r"[ .;,?!\"]", messageText):
-                    word = word.lower().encode('ascii', 'ignore')
+                ascii_text = message_text.encode('ascii', 'ignore').decode('ascii')
+                re.sub(r'[^a-zA-Z0-9 \n]+', '', ascii_text)
+
+                for word in re.split(r"[ \n]", ascii_text):
+                    word = word.lower()
 
                     if not word or word in self.basic_words:
                         continue

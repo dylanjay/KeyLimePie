@@ -53,7 +53,12 @@ class MessageRetriever(BaseRetriever):
         database = self.mongo_client[self.database_name]
         doc_collection = database[self.documents_collection_name]
 
-        for word in re.split(r"[ .;,?!\"]", query):
+        ascii_text = query.encode('ascii', 'ignore').decode('ascii')
+        re.sub(r'[^a-zA-Z0-9 \n]+', '', ascii_text)
+
+        for word in re.split(r"[ \n]", ascii_text):
+            word = word.lower()
+
             if not word or word in self.basic_words:
                 continue
 
